@@ -44,6 +44,7 @@ jobs:
           app-id: 3060111
           private-key: ${{ secrets.HOTDATA_AUTOMATION_PRIVATE_KEY }}
           owner: hotdata-dev
+          repositories: runtimedb
 
       - name: Check for upstream rev change
         id: check
