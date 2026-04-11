@@ -17,6 +17,4 @@ This mirror exists to insulate [runtimedb](https://github.com/hotdata-dev/runtim
 
 ## Setup
 
-The sync workflow requires a `RUNTIMEDB_PAT` repository secret — a fine-grained GitHub PAT with:
-- **Repository access**: `hotdata-dev/runtimedb`
-- **Permissions**: `Contents: Read and write`, `Pull requests: Read and write`
+The sync workflow requires a `HOTDATA_AUTOMATION_PRIVATE_KEY` repository secret — the private key for the hotdata-dev GitHub App (ID `3060111`), which provides cross-repo access to file PRs against runtimedb.
