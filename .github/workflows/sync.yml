@@ -1,0 +1,127 @@
+name: Mirror Sync & Monitor
+
+on:
+  schedule:
+    - cron: "0 8 * * *" # Daily at 8am UTC
+  workflow_dispatch: {}
+
+permissions:
+  contents: write
+
+jobs:
+  sync:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Mirror branches and tags from spiceai/snowflake-rs
+        run: |
+          git clone --bare https://github.com/spiceai/snowflake-rs.git /tmp/upstream
+          cd /tmp/upstream
+
+          git remote add mirror https://x-access-token:${{ secrets.GITHUB_TOKEN }}@github.com/${{ github.repository }}.git
+
+          # Push every branch except our admin branch
+          for ref in $(git for-each-ref --format='%(refname)' refs/heads/); do
+            branch="${ref#refs/heads/}"
+            if [ "$branch" = "hotdata" ]; then
+              echo "Skipping admin branch: hotdata"
+              continue
+            fi
+            echo "Syncing branch: $branch"
+            git push mirror "$ref:$ref" --force
+          done
+
+          # Push all tags
+          git push mirror --tags --force
+
+  monitor:
+    runs-on: ubuntu-latest
+    needs: sync
+    steps:
+      - name: Check for upstream rev change
+        id: check
+        env:
+          GH_TOKEN: ${{ secrets.RUNTIMEDB_PAT }}
+        run: |
+          # Get the rev spiceai/spiceai currently pins
+          UPSTREAM_CARGO=$(curl -sfL https://raw.githubusercontent.com/spiceai/spiceai/trunk/Cargo.toml)
+          UPSTREAM_REV=$(echo "$UPSTREAM_CARGO" | grep 'snowflake-api' | grep -oP 'rev = "\K[a-f0-9]+')
+
+          if [ -z "$UPSTREAM_REV" ]; then
+            echo "Could not extract upstream rev — skipping"
+            exit 0
+          fi
+          echo "upstream_rev=$UPSTREAM_REV" >> "$GITHUB_OUTPUT"
+
+          # Get the rev runtimedb currently uses
+          RUNTIMEDB_CARGO=$(curl -sfL \
+            -H "Authorization: Bearer $GH_TOKEN" \
+            -H "Accept: application/vnd.github.raw+json" \
+            "https://api.github.com/repos/hotdata-dev/runtimedb/contents/Cargo.toml?ref=main")
+          CURRENT_REV=$(echo "$RUNTIMEDB_CARGO" | grep 'snowflake-api' | grep -oP 'rev = "\K[a-f0-9]+')
+
+          if [ -z "$CURRENT_REV" ]; then
+            echo "Could not extract runtimedb rev — skipping"
+            exit 0
+          fi
+          echo "current_rev=$CURRENT_REV" >> "$GITHUB_OUTPUT"
+
+          if [ "$UPSTREAM_REV" != "$CURRENT_REV" ]; then
+            echo "Rev changed: $CURRENT_REV -> $UPSTREAM_REV"
+            echo "changed=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "Revs match ($CURRENT_REV) — nothing to do"
+            echo "changed=false" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Verify commit exists in mirror
+        if: steps.check.outputs.changed == 'true'
+        env:
+          UPSTREAM_REV: ${{ steps.check.outputs.upstream_rev }}
+        run: |
+          HTTP_CODE=$(curl -so /dev/null -w '%{http_code}' \
+            "https://api.github.com/repos/${{ github.repository }}/git/commits/$UPSTREAM_REV")
+          if [ "$HTTP_CODE" != "200" ]; then
+            echo "::error::Commit $UPSTREAM_REV not found in mirror (HTTP $HTTP_CODE)"
+            exit 1
+          fi
+
+      - name: File PR against runtimedb
+        if: steps.check.outputs.changed == 'true'
+        env:
+          GH_TOKEN: ${{ secrets.RUNTIMEDB_PAT }}
+          UPSTREAM_REV: ${{ steps.check.outputs.upstream_rev }}
+          CURRENT_REV: ${{ steps.check.outputs.current_rev }}
+        run: |
+          SHORT_REV="${UPSTREAM_REV:0:7}"
+
+          # Check for existing open PR
+          EXISTING=$(gh pr list --repo hotdata-dev/runtimedb \
+            --search "update snowflake-rs rev" --state open \
+            --json number --jq '.[0].number')
+          if [ -n "$EXISTING" ]; then
+            echo "PR #$EXISTING already open — skipping"
+            exit 0
+          fi
+
+          # Clone runtimedb and create update branch
+          gh repo clone hotdata-dev/runtimedb /tmp/runtimedb
+          cd /tmp/runtimedb
+
+          BRANCH="chore/update-snowflake-rs-rev-${SHORT_REV}"
+          git checkout -b "$BRANCH"
+
+          # Update the rev in Cargo.toml
+          sed -i "s|rev = \"$CURRENT_REV\"|rev = \"$UPSTREAM_REV\"|" Cargo.toml
+
+          git add Cargo.toml
+          git commit -m "chore(deps): update snowflake-rs rev to ${SHORT_REV}"
+          git push -u origin "$BRANCH"
+
+          gh pr create --repo hotdata-dev/runtimedb \
+            --title "chore(deps): update snowflake-rs rev to ${SHORT_REV}" \
+            --body "$(cat <<EOF
+          Spice.ai updated their snowflake-rs pin from \`${CURRENT_REV:0:12}\` to \`${UPSTREAM_REV:0:12}\`.
+
+          Detected automatically by the [mirror sync workflow](https://github.com/${{ github.repository }}/actions).
+          EOF
+          )"
