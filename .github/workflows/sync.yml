@@ -119,6 +119,9 @@ jobs:
           BRANCH="chore/update-snowflake-rs-rev-${SHORT_REV}"
           git checkout -b "$BRANCH"
 
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          git config user.name "github-actions[bot]"
+
           # Update the rev in Cargo.toml
           sed -i "s|rev = \"$CURRENT_REV\"|rev = \"$UPSTREAM_REV\"|" Cargo.toml
 
